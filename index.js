@@ -1,5 +1,4 @@
-const WebSocket = require("ws");
-const wss = new WebSocket.Server({ port: 3000 });
+const net = require("net");
 
 const rooms = {};
 
@@ -10,79 +9,82 @@ function generateCode() {
     return code;
 }
 
-wss.on("connection", (ws) => {
-    ws.on("message", (data) => {
-        try {
-            const msg = JSON.parse(data);
+function send(socket, obj) {
+    try {
+        socket.write(JSON.stringify(obj) + "\n");
+    } catch(e) {}
+}
 
-            // Crear sala
-            if (msg.type == "create") {
-                let code = generateCode();
-                while (rooms[code]) code = generateCode();
-                rooms[code] = {
-                    host: ws,
-                    client: null,
-                    hostChar: msg.character,
-                    clientChar: null
-                };
-                ws.roomCode = code;
-                ws.role = "host";
-                ws.send(JSON.stringify({ type: "created", code: code }));
-            }
+const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    let buffer = "";
 
-            // Unirse a sala
-            if (msg.type == "join") {
-                const room = rooms[msg.code];
-                if (!room) {
-                    ws.send(JSON.stringify({ type: "error", msg: "Sala no encontrada" }));
-                    return;
+    socket.on("data", (data) => {
+        buffer += data;
+        let lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (let line of lines) {
+            if (!line.trim()) continue;
+            try {
+                const msg = JSON.parse(line);
+
+                if (msg.type == "create") {
+                    let code = generateCode();
+                    while (rooms[code]) code = generateCode();
+                    rooms[code] = { host: socket, client: null, hostChar: msg.character };
+                    socket.roomCode = code;
+                    socket.role = "host";
+                    send(socket, { type: "created", code: code });
+                    console.log("Sala creada:", code);
                 }
-                if (room.client) {
-                    ws.send(JSON.stringify({ type: "error", msg: "Sala llena" }));
-                    return;
+
+                if (msg.type == "join") {
+                    const room = rooms[msg.code];
+                    if (!room) { send(socket, { type: "error", msg: "Sala no encontrada" }); return; }
+                    if (room.client) { send(socket, { type: "error", msg: "Sala llena" }); return; }
+                    room.client = socket;
+                    room.clientChar = msg.character;
+                    socket.roomCode = msg.code;
+                    socket.role = "client";
+                    send(room.host, { type: "start", myChar: room.hostChar, enemyChar: room.clientChar, isHost: true });
+                    send(room.client, { type: "start", myChar: room.clientChar, enemyChar: room.hostChar, isHost: false });
+                    console.log("Sala", msg.code, "iniciada");
                 }
-                room.client = ws;
-                room.clientChar = msg.character;
-                ws.roomCode = msg.code;
-                ws.role = "client";
 
-                // Avisar a los dos que ya están conectados
-                room.host.send(JSON.stringify({ type: "start", myChar: room.hostChar, enemyChar: room.clientChar, isHost: true }));
-                room.client.send(JSON.stringify({ type: "start", myChar: room.clientChar, enemyChar: room.hostChar, isHost: false }));
-            }
-
-            // Elegir nivel (solo el host)
-            if (msg.type == "level") {
-                const room = rooms[ws.roomCode];
-                if (!room) return;
-                if (ws.role != "host") return;
-                room.client.send(JSON.stringify({ type: "level", level: msg.level }));
-            }
-
-            // Inputs
-            if (msg.type == "input") {
-                const room = rooms[ws.roomCode];
-                if (!room) return;
-                if (ws.role == "host" && room.client) {
-                    room.client.send(JSON.stringify({ type: "input", ...msg }));
-                } else if (ws.role == "client" && room.host) {
-                    room.host.send(JSON.stringify({ type: "input", ...msg }));
+                if (msg.type == "level") {
+                    const room = rooms[socket.roomCode];
+                    if (!room || socket.role != "host") return;
+                    send(room.client, { type: "level", level: msg.level });
                 }
-            }
 
-        } catch (e) {
-            console.log("Error:", e);
+                if (msg.type == "input") {
+                    const room = rooms[socket.roomCode];
+                    if (!room) return;
+                    if (socket.role == "host" && room.client) send(room.client, { type: "input", ...msg });
+                    else if (socket.role == "client" && room.host) send(room.host, { type: "input", ...msg });
+                }
+
+            } catch(e) {
+                console.log("Error parsing:", e.message);
+            }
         }
     });
 
-    ws.on("close", () => {
-        const code = ws.roomCode;
+    socket.on("close", () => {
+        const code = socket.roomCode;
         if (!code || !rooms[code]) return;
         const room = rooms[code];
-        const other = ws.role == "host" ? room.client : room.host;
-        if (other) other.send(JSON.stringify({ type: "disconnect" }));
+        const other = socket.role == "host" ? room.client : room.host;
+        if (other) send(other, { type: "disconnect" });
         delete rooms[code];
+        console.log("Sala", code, "cerrada");
     });
+
+    socket.on("error", () => {});
 });
 
-console.log("Servidor corriendo en puerto 3000");
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log("Servidor corriendo en puerto", PORT);
+});
