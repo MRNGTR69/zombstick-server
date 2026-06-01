@@ -1,4 +1,11 @@
 const http = require("http");
+const { Server } = require("socket.io");
+
+const server = http.createServer();
+const io = new Server(server, {
+    cors: { origin: "*" }
+});
+
 const rooms = {};
 
 function generateCode() {
@@ -8,66 +15,53 @@ function generateCode() {
     return code;
 }
 
-const server = http.createServer((req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/json");
+io.on("connection", (socket) => {
+    console.log("Conectado:", socket.id);
 
-    let body = "";
-    req.on("data", d => body += d);
-    req.on("end", () => {
-        try {
-            const msg = JSON.parse(body || "{}");
+    socket.on("create", (data) => {
+        let code = generateCode();
+        while (rooms[code]) code = generateCode();
+        rooms[code] = { host: socket, client: null, hostChar: data.character };
+        socket.roomCode = code;
+        socket.role = "host";
+        socket.emit("created", { code });
+        console.log("Sala creada:", code);
+    });
 
-            if (req.url == "/create") {
-                let code = generateCode();
-                while (rooms[code]) code = generateCode();
-                rooms[code] = { hostChar: msg.character, clientChar: null, level: -1, hostInputs: {}, clientInputs: {}, clientJoined: false };
-                res.end(JSON.stringify({ code }));
-            }
-            else if (req.url == "/join") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ error: "Sala no encontrada" })); return; }
-                if (room.clientJoined) { res.end(JSON.stringify({ error: "Sala llena" })); return; }
-                room.clientChar = msg.character;
-                room.clientJoined = true;
-                res.end(JSON.stringify({ ok: true, hostChar: room.hostChar }));
-            }
-            else if (req.url == "/level") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ error: "no room" })); return; }
-                room.level = msg.level;
-                res.end(JSON.stringify({ ok: true }));
-            }
-            else if (req.url == "/poll_join") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ waiting: true })); return; }
-                if (!room.clientJoined) { res.end(JSON.stringify({ waiting: true })); return; }
-                res.end(JSON.stringify({ waiting: false, clientChar: room.clientChar }));
-            }
-            else if (req.url == "/poll_level") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ level: -1 })); return; }
-                res.end(JSON.stringify({ level: room.level }));
-            }
-            else if (req.url == "/send_input") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ ok: false })); return; }
-                if (msg.role == "host") room.hostInputs = msg.inputs;
-                else room.clientInputs = msg.inputs;
-                res.end(JSON.stringify({ ok: true }));
-            }
-            else if (req.url == "/get_input") {
-                const room = rooms[msg.code];
-                if (!room) { res.end(JSON.stringify({ inputs: {} })); return; }
-                if (msg.role == "host") res.end(JSON.stringify({ inputs: room.clientInputs }));
-                else res.end(JSON.stringify({ inputs: room.hostInputs }));
-            }
-            else {
-                res.end(JSON.stringify({ ok: true }));
-            }
-        } catch(e) {
-            res.end(JSON.stringify({ error: e.message }));
-        }
+    socket.on("join", (data) => {
+        const room = rooms[data.code];
+        if (!room) { socket.emit("error_msg", { msg: "Sala no encontrada" }); return; }
+        if (room.client) { socket.emit("error_msg", { msg: "Sala llena" }); return; }
+        room.client = socket;
+        room.clientChar = data.character;
+        socket.roomCode = data.code;
+        socket.role = "client";
+        room.host.emit("start", { myChar: room.hostChar, enemyChar: room.clientChar, isHost: true });
+        room.client.emit("start", { myChar: room.clientChar, enemyChar: room.hostChar, isHost: false });
+        console.log("Sala", data.code, "iniciada");
+    });
+
+    socket.on("level", (data) => {
+        const room = rooms[socket.roomCode];
+        if (!room || socket.role != "host") return;
+        room.client.emit("level", { level: data.level });
+    });
+
+    socket.on("input", (data) => {
+        const room = rooms[socket.roomCode];
+        if (!room) return;
+        if (socket.role == "host" && room.client) room.client.emit("input", data);
+        else if (socket.role == "client" && room.host) room.host.emit("input", data);
+    });
+
+    socket.on("disconnect", () => {
+        const code = socket.roomCode;
+        if (!code || !rooms[code]) return;
+        const room = rooms[code];
+        const other = socket.role == "host" ? room.client : room.host;
+        if (other) other.emit("disconnected");
+        delete rooms[code];
+        console.log("Sala", code, "cerrada");
     });
 });
 
