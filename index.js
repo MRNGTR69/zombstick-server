@@ -1,5 +1,4 @@
-const net = require("net");
-
+const http = require("http");
 const rooms = {};
 
 function generateCode() {
@@ -9,82 +8,68 @@ function generateCode() {
     return code;
 }
 
-function send(socket, obj) {
-    try {
-        socket.write(JSON.stringify(obj) + "\n");
-    } catch(e) {}
-}
+const server = http.createServer((req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", "application/json");
 
-const server = net.createServer((socket) => {
-    socket.setEncoding("utf8");
-    let buffer = "";
+    let body = "";
+    req.on("data", d => body += d);
+    req.on("end", () => {
+        try {
+            const msg = JSON.parse(body || "{}");
 
-    socket.on("data", (data) => {
-        buffer += data;
-        let lines = buffer.split("\n");
-        buffer = lines.pop();
-
-        for (let line of lines) {
-            if (!line.trim()) continue;
-            try {
-                const msg = JSON.parse(line);
-
-                if (msg.type == "create") {
-                    let code = generateCode();
-                    while (rooms[code]) code = generateCode();
-                    rooms[code] = { host: socket, client: null, hostChar: msg.character };
-                    socket.roomCode = code;
-                    socket.role = "host";
-                    send(socket, { type: "created", code: code });
-                    console.log("Sala creada:", code);
-                }
-
-                if (msg.type == "join") {
-                    const room = rooms[msg.code];
-                    if (!room) { send(socket, { type: "error", msg: "Sala no encontrada" }); return; }
-                    if (room.client) { send(socket, { type: "error", msg: "Sala llena" }); return; }
-                    room.client = socket;
-                    room.clientChar = msg.character;
-                    socket.roomCode = msg.code;
-                    socket.role = "client";
-                    send(room.host, { type: "start", myChar: room.hostChar, enemyChar: room.clientChar, isHost: true });
-                    send(room.client, { type: "start", myChar: room.clientChar, enemyChar: room.hostChar, isHost: false });
-                    console.log("Sala", msg.code, "iniciada");
-                }
-
-                if (msg.type == "level") {
-                    const room = rooms[socket.roomCode];
-                    if (!room || socket.role != "host") return;
-                    send(room.client, { type: "level", level: msg.level });
-                }
-
-                if (msg.type == "input") {
-                    const room = rooms[socket.roomCode];
-                    if (!room) return;
-                    if (socket.role == "host" && room.client) send(room.client, { type: "input", ...msg });
-                    else if (socket.role == "client" && room.host) send(room.host, { type: "input", ...msg });
-                }
-
-            } catch(e) {
-                console.log("Error parsing:", e.message);
+            if (req.url == "/create") {
+                let code = generateCode();
+                while (rooms[code]) code = generateCode();
+                rooms[code] = { hostChar: msg.character, clientChar: null, level: -1, hostInputs: {}, clientInputs: {}, clientJoined: false };
+                res.end(JSON.stringify({ code }));
             }
+            else if (req.url == "/join") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ error: "Sala no encontrada" })); return; }
+                if (room.clientJoined) { res.end(JSON.stringify({ error: "Sala llena" })); return; }
+                room.clientChar = msg.character;
+                room.clientJoined = true;
+                res.end(JSON.stringify({ ok: true, hostChar: room.hostChar }));
+            }
+            else if (req.url == "/level") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ error: "no room" })); return; }
+                room.level = msg.level;
+                res.end(JSON.stringify({ ok: true }));
+            }
+            else if (req.url == "/poll_join") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ waiting: true })); return; }
+                if (!room.clientJoined) { res.end(JSON.stringify({ waiting: true })); return; }
+                res.end(JSON.stringify({ waiting: false, clientChar: room.clientChar }));
+            }
+            else if (req.url == "/poll_level") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ level: -1 })); return; }
+                res.end(JSON.stringify({ level: room.level }));
+            }
+            else if (req.url == "/send_input") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ ok: false })); return; }
+                if (msg.role == "host") room.hostInputs = msg.inputs;
+                else room.clientInputs = msg.inputs;
+                res.end(JSON.stringify({ ok: true }));
+            }
+            else if (req.url == "/get_input") {
+                const room = rooms[msg.code];
+                if (!room) { res.end(JSON.stringify({ inputs: {} })); return; }
+                if (msg.role == "host") res.end(JSON.stringify({ inputs: room.clientInputs }));
+                else res.end(JSON.stringify({ inputs: room.hostInputs }));
+            }
+            else {
+                res.end(JSON.stringify({ ok: true }));
+            }
+        } catch(e) {
+            res.end(JSON.stringify({ error: e.message }));
         }
     });
-
-    socket.on("close", () => {
-        const code = socket.roomCode;
-        if (!code || !rooms[code]) return;
-        const room = rooms[code];
-        const other = socket.role == "host" ? room.client : room.host;
-        if (other) send(other, { type: "disconnect" });
-        delete rooms[code];
-        console.log("Sala", code, "cerrada");
-    });
-
-    socket.on("error", () => {});
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log("Servidor corriendo en puerto", PORT);
-});
+server.listen(PORT, () => console.log("Servidor corriendo en puerto", PORT));
